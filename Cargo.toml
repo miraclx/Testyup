@@ -1,0 +1,19 @@
+[package]
+name = "test_redirect"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hyper = "^0.14"
+hyper-rustls = "0.23.0"
+serde = "^1.0"
+serde_json = "^1.0"
+serde_derive = "1.0"
+yup-oauth2 = "7.0.1"
+webbrowser = "0.8.2"
+[dependencies.rocket]
+version = "0.5.0-rc.1"
+default-features = false
+features = ["json"]
