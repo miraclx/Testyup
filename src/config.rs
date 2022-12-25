@@ -6,15 +6,13 @@
 //! paste needed to continue with the operation.
 use hyper;
 use hyper_rustls;
-use serde_derive::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 use yup_oauth2::{
     authenticator::Authenticator,
     authenticator_delegate::{DefaultInstalledFlowDelegate, InstalledFlowDelegate},
 };
-use rocket::{http::hyper::header::LOCATION, Response};
-use rocket::http::Header;
+use rocket::post;
 
 
 pub async fn authenticate(
@@ -55,11 +53,6 @@ async fn browser_user_url(url: &str, need_code: bool) -> Result<String, String> 
     def_delegate.present_user_url(url, need_code).await
 }
 
-// Get present uri.
-pub async fn present_uri() -> String {
-    let value = InstalledFlowDelegate::redirect_uri(&InstalledFlowBrowserDelegate);
-    return value.unwrap().to_string();
-}
 /// our custom delegate struct we will implement a flow delegate trait for:
 /// in this case we will implement the `InstalledFlowDelegated` trait
 #[derive(Copy, Clone)]
@@ -79,7 +72,33 @@ impl InstalledFlowDelegate for InstalledFlowBrowserDelegate {
     }
 
     fn redirect_uri(&self) -> Option<&str> {
-        return Some("https://peppubooks.com");
+        return Some("https://google.com");
     }
 }
 
+#[post("/", data = "<name>")]
+pub async fn create(name: String)  {
+    let value = serde_json::json!({
+        "function": "create_folder",
+        "parameters": [
+            name
+        ],
+    });
+    let client = reqwest::Client::new();
+    let auth = authenticate().await;
+    let token = auth
+        .token(&[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive",
+        ])
+        .await
+        .unwrap();
+    let res = client.post("https://script.googleapis.com/v1/scripts/AKfycbzkB3j5U6pn_n9n2DN3OTLyjRA5owEN2C-u_sZyICYNCXwTs7DbTu0KIjTke2zQR5OE8g:run")
+    .json(&value)
+    .bearer_auth(token.as_str())
+    .send()
+    .await.unwrap();
+    let val = res.text().await.unwrap();
+    println!("{}", val)
+}
