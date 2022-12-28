@@ -96,7 +96,7 @@ impl InstalledFlowDelegate for InstalledFlowBrowserDelegate {
 }
 
 #[post("/", data = "<name>")]
-pub async fn create(state: &State<ServerState>, name: String) {
+pub async fn create(server_state: &State<ServerState>, name: String) {
     let value = serde_json::json!({
         "function": "create_folder",
         "parameters": [
