@@ -18,6 +18,6 @@ pub struct ServerState {
 fn rocket() -> _ {
     rocket::build()
         .mount("/template", routes![config::create])
-        .mount("/oauth", routes![config::oauth])
+        .mount("/oauth", routes![config::client_login])
         .manage(ServerState::default())
 }

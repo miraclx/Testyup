@@ -11,16 +11,14 @@ use rand::{Rng, SeedableRng};
 use rocket::{get, post, State};
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::oneshot;
-use yup_oauth2::{
-    authenticator::Authenticator,
-    authenticator_delegate::{DefaultInstalledFlowDelegate, InstalledFlowDelegate},
-};
+use tokio::sync::{oneshot, RwLock};
+use yup_oauth2::{authenticator::Authenticator, authenticator_delegate::InstalledFlowDelegate};
 
 use super::ServerState;
 
 pub async fn authenticate(
-    reciever: oneshot::Receiver<String>,
+    state_id: String,
+    auth_code_rx: oneshot::Receiver<String>,
 ) -> Authenticator<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>> {
     // Get an ApplicationSecret instance by some means. It contains the `client_id` and
     // `client_secret`, among other things.
@@ -35,10 +33,13 @@ pub async fn authenticate(
     // retrieve them from storage.
     let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
         secret,
-        yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
+        yup_oauth2::InstalledFlowReturnMethod::Interactive,
     )
     .persist_tokens_to_disk("tokencache.json")
-    .flow_delegate(Box::new(InstalledFlowBrowserDelegate(reciever)))
+    .flow_delegate(Box::new(InstalledFlowBrowserDelegate {
+        state_id,
+        auth_code_rx: RwLock::new(Some(auth_code_rx)),
+    }))
     .build()
     .await
     .unwrap();
@@ -49,18 +50,22 @@ pub async fn authenticate(
 /// async function to be pinned by the `present_user_url` method of the trait
 /// we use the existing `DefaultInstalledFlowDelegate::present_user_url` method as a fallback for
 /// when the browser did not open for example, the user still see's the URL.
-async fn browser_user_url(url: &str, need_code: bool) -> Result<String, String> {
+async fn browser_user_url(url: &str /* , need_code: bool */) /* -> Result<String, String>  */
+{
     // Add client redirect here.
     if webbrowser::open(url).is_ok() {
         println!("webbrowser was successfully opened.");
     }
-    let def_delegate = DefaultInstalledFlowDelegate;
-    def_delegate.present_user_url(url, need_code).await
+    // let def_delegate = DefaultInstalledFlowDelegate;
+    // def_delegate.present_user_url(url, need_code).await
 }
 
 /// our custom delegate struct we will implement a flow delegate trait for:
 /// in this case we will implement the `InstalledFlowDelegated` trait
-pub struct InstalledFlowBrowserDelegate(oneshot::Receiver<String>);
+pub struct InstalledFlowBrowserDelegate {
+    pub state_id: String,
+    pub auth_code_rx: RwLock<Option<oneshot::Receiver<String>>>,
+}
 
 /// here we implement only the present_user_url method with the added webbrowser opening
 /// the other behaviour of the trait does not need to be changed.
@@ -70,14 +75,23 @@ impl InstalledFlowDelegate for InstalledFlowBrowserDelegate {
     fn present_user_url<'a>(
         &'a self,
         url: &'a str,
-        need_code: bool,
+        _need_code: bool,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(browser_user_url(url, need_code))
+        Box::pin(async move {
+            let url = format!("{}?state={}", url, self.state_id);
+            browser_user_url(&url).await;
+            if let Some(auth_code_rx) = self.auth_code_rx.write().await.take() {
+                auth_code_rx
+                    .await
+                    .map_err(|_| "auth code receiver closed".to_string())
+            } else {
+                Err("auth code receiver already consumed".to_string())
+            }
+        })
     }
 
     fn redirect_uri(&self) -> Option<&str> {
-        // todo! change this to the actual redirect uri
-        None
+        Some("http://localhost:8000/oauth2/client_login")
     }
 }
 
@@ -94,22 +108,26 @@ pub async fn create(state: &State<ServerState>, name: String) {
     // todo! ensure this is non-blocking
     let mut rng = rand::rngs::StdRng::from_entropy();
 
-    let (tx, rx) = oneshot::channel();
-
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
                             abcdefghijklmnopqrstuvwxyz\
                             0123456789_-";
 
-    let auth_id: String = (0..256)
+    let state_id: String = (0..256)
         .map(|_| {
             let idx = rng.gen_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect();
 
-    state.oauth_handlers.write().await.insert(auth_id, tx);
+    let (tx, rx) = oneshot::channel();
 
-    let auth = authenticate(rx).await;
+    state
+        .oauth_handlers
+        .write()
+        .await
+        .insert(state_id.clone(), tx);
+
+    let auth = authenticate(state_id, rx).await;
     let token = auth
         .token(&[
             "https://www.googleapis.com/auth/spreadsheets",
@@ -141,14 +159,15 @@ pub async fn create(state: &State<ServerState>, name: String) {
 // ?
 // ? here, zoom is using token as a session id, and code as the auth code
 // ? we are using auth_id as a session id, and code as the auth code
-// todo! verify that auth_id will work
+// todo! verify that state= will be proxied
 // todo! verify that the redirect recipient is a get request
-#[get("/oauth?<code>&<auth_id>")]
-pub async fn oauth(state: &State<ServerState>, code: String, auth_id: String) {
-    let sender = match state.oauth_handlers.write().await.remove(&auth_id) {
+#[get("/client_login?<code>&<state>")]
+pub async fn client_login(server_state: &State<ServerState>, code: String, state: String) {
+    let state_id = state;
+    let sender = match server_state.oauth_handlers.write().await.remove(&state_id) {
         Some(sender) => sender,
         None => {
-            println!("No sender found for auth_id {}", auth_id);
+            println!("No sender found for state_id {}", state_id);
             return;
         }
     };
