@@ -1621,11 +1621,13 @@ version = "0.1.0"
 dependencies = [
  "hyper",
  "hyper-rustls",
+ "rand",
  "reqwest",
  "rocket",
  "serde",
  "serde_derive",
  "serde_json",
+ "tokio",
  "webbrowser",
  "yup-oauth2",
 ]

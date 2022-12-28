@@ -4,18 +4,23 @@
 //! scope by clicking through e.g. the google oauth2, after this is done a local webserver started
 //! by InstalledFlowAuthenticator will consume the token coming from the oauth2 server = no copy or
 //! paste needed to continue with the operation.
+
 use hyper;
 use hyper_rustls;
+use rand::{Rng, SeedableRng};
+use rocket::{get, post, State};
 use std::future::Future;
 use std::pin::Pin;
+use tokio::sync::oneshot;
 use yup_oauth2::{
     authenticator::Authenticator,
     authenticator_delegate::{DefaultInstalledFlowDelegate, InstalledFlowDelegate},
 };
-use rocket::post;
 
+use super::ServerState;
 
 pub async fn authenticate(
+    reciever: oneshot::Receiver<String>,
 ) -> Authenticator<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>> {
     // Get an ApplicationSecret instance by some means. It contains the `client_id` and
     // `client_secret`, among other things.
@@ -33,7 +38,7 @@ pub async fn authenticate(
         yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
     )
     .persist_tokens_to_disk("tokencache.json")
-    .flow_delegate(Box::new(InstalledFlowBrowserDelegate))
+    .flow_delegate(Box::new(InstalledFlowBrowserDelegate(reciever)))
     .build()
     .await
     .unwrap();
@@ -55,8 +60,7 @@ async fn browser_user_url(url: &str, need_code: bool) -> Result<String, String> 
 
 /// our custom delegate struct we will implement a flow delegate trait for:
 /// in this case we will implement the `InstalledFlowDelegated` trait
-#[derive(Copy, Clone)]
-pub struct InstalledFlowBrowserDelegate;
+pub struct InstalledFlowBrowserDelegate(oneshot::Receiver<String>);
 
 /// here we implement only the present_user_url method with the added webbrowser opening
 /// the other behaviour of the trait does not need to be changed.
@@ -72,12 +76,13 @@ impl InstalledFlowDelegate for InstalledFlowBrowserDelegate {
     }
 
     fn redirect_uri(&self) -> Option<&str> {
-        return Some("https://google.com");
+        // todo! change this to the actual redirect uri
+        None
     }
 }
 
 #[post("/", data = "<name>")]
-pub async fn create(name: String)  {
+pub async fn create(state: &State<ServerState>, name: String) {
     let value = serde_json::json!({
         "function": "create_folder",
         "parameters": [
@@ -85,7 +90,26 @@ pub async fn create(name: String)  {
         ],
     });
     let client = reqwest::Client::new();
-    let auth = authenticate().await;
+
+    // todo! ensure this is non-blocking
+    let mut rng = rand::rngs::StdRng::from_entropy();
+
+    let (tx, rx) = oneshot::channel();
+
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                            abcdefghijklmnopqrstuvwxyz\
+                            0123456789_-";
+
+    let auth_id: String = (0..256)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect();
+
+    state.oauth_handlers.write().await.insert(auth_id, tx);
+
+    let auth = authenticate(rx).await;
     let token = auth
         .token(&[
             "https://www.googleapis.com/auth/spreadsheets",
@@ -101,4 +125,34 @@ pub async fn create(name: String)  {
     .await.unwrap();
     let val = res.text().await.unwrap();
     println!("{}", val)
+}
+
+// ? here's an example of a redirect uri
+// ? https://google.zoom.us/google/oauth/client_login?
+// ?  token=xxx
+// ?  st=xxx
+// ?  code=xxx
+// ?  scope=email%20profile%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email%20openid
+// ?  code_challenge=xxx
+// ?  ver=5.13.0.13815
+// ?  mode=token2
+// ?  _x_zm_rtaid=xxx
+// ?  _x_zm_rhtaid=xxx
+// ?
+// ? here, zoom is using token as a session id, and code as the auth code
+// ? we are using auth_id as a session id, and code as the auth code
+// todo! verify that auth_id will work
+// todo! verify that the redirect recipient is a get request
+#[get("/oauth?<code>&<auth_id>")]
+pub async fn oauth(state: &State<ServerState>, code: String, auth_id: String) {
+    let sender = match state.oauth_handlers.write().await.remove(&auth_id) {
+        Some(sender) => sender,
+        None => {
+            println!("No sender found for auth_id {}", auth_id);
+            return;
+        }
+    };
+    if let Err(_) = sender.send(code) {
+        println!("Receiver dropped before sending code");
+    }
 }
